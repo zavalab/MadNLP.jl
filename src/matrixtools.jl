@@ -13,36 +13,6 @@ size(A::SparseMatrixCOO) = (A.m,A.n)
 getindex(A::SparseMatrixCOO{Float64,Ti},i::Int,j::Int) where Ti <: Integer = sum(A.V[(A.I.==i) .* (A.J.==j)])
 nnz(A::SparseMatrixCOO) = length(A.I)
 
-symv!(y::StrideOneVector{Float64},A::SparseMatrixCSC{Float64,Int32},x::StrideOneVector{Float64}) =
-    (length(y) > 0 && length(x) >0) &&
-    ccall((:mkl_dcsrsymv,libmkl32),
-          Cvoid,
-          (Ref{Cchar},Ref{Int32},Ptr{Float64},Ptr{Int32},Ptr{Int32},Ptr{Float64},Ptr{Float64}),
-          'u',Int32(A.n),A.nzval,A.colptr,A.rowval,x,y)
-mv!(y::StrideOneVector{Float64},A::SparseMatrixCSC{Float64,Int32},x::StrideOneVector{Float64};
-    alpha::Float64=1.,beta::Float64=0.) = (length(y) > 0) &&
-        ccall((:mkl_dcscmv,libmkl32),
-              Cvoid,
-              (Ref{Cchar},Ref{Int32},Ref{Int32},Ref{Float64},Ptr{Cchar},Ptr{Float64},Ptr{Int32},
-               Ptr{Int32},Ptr{Int32},Ptr{Float64},Ref{Float64},Ptr{Float64}),
-              'n',Int32(A.m),Int32(A.n),alpha,"G00000",A.nzval,A.rowval,
-              pointer(A.colptr),pointer(A.colptr)+4,x,beta,y)
-mv!(y::StrideOneVector{Float64},A::Adjoint{Float64,SparseMatrixCSC{Float64,Int32}},x::StrideOneVector{Float64};
-    alpha::Float64=1.,beta::Float64=0.) = (length(y) > 0 && length(x) > 0) &&
-        ccall((:mkl_dcscmv,libmkl32),
-              Cvoid,
-              (Ref{Cchar},Ref{Int32},Ref{Int32},Ref{Float64},Ptr{Cchar},Ptr{Float64},Ptr{Int32},
-               Ptr{Int32},Ptr{Int32},Ptr{Float64},Ref{Float64},Ptr{Float64}),
-              't',Int32(A.parent.m),Int32(A.parent.n),alpha,"G00000",A.parent.nzval,A.parent.rowval,
-              pointer(A.parent.colptr),pointer(A.parent.colptr)+4,x,beta,y)
-symv!(y::StrideOneVector{Float64},A::Matrix{Float64},x::StrideOneVector{Float64}) =
-    (length(y) > 0 && length(x) >0) && BLAS.symv!('l', 1., A, x, 0., y)
-mv!(y::StrideOneVector{Float64},A::Matrix{Float64},x::StrideOneVector{Float64};
-    alpha::Float64=1.,beta::Float64=0.) = (length(y) > 0) && BLAS.gemv!('n',alpha,A,x,beta,y)
-mv!(y::StrideOneVector{Float64},A::Adjoint{Float64,Matrix{Float64}},x::StrideOneVector{Float64};
-    alpha::Float64=1.,beta::Float64=0.) = (length(y) > 0) && BLAS.gemv!('t',alpha,A.parent,x,beta,y)
-
-
 function findIJ(S::SparseMatrixCSC{Tv,Ti}) where {Tv,Ti}
     numnz = nnz(S)
     I = Vector{Ti}(undef,numnz)
@@ -112,9 +82,9 @@ end
 
 copyto!(dense::Matrix{Tv},coo::SparseMatrixCOO{Tv,Ti}) where {Tv,Ti<:Integer} = _copyto!(dense,coo.I,coo.J,coo.V)
 function _copyto!(dense::Matrix{Tv},I,J,V) where Tv
-    dense.=0
+    fill!(dense, zero(Tv))
     for i=1:length(I)
-        dense[I[i],J[i]]+=V[i]
+        @inbounds dense[I[i], J[i]] += V[i]
     end
     return dense
 end
@@ -126,7 +96,7 @@ function get_cscsy_view(csc::SparseMatrixCSC{Tv,Ti},Ix;inds=collect(1:nnz(csc)))
     return SparseMatrixCSC{Tv,Ti}(
         cscindsub.m,cscindsub.n,cscindsub.colptr,
         cscindsub.rowval,Vector{Tv}(undef,nnz(cscindsub))), view(csc.nzval,cscindsub.nzval)
-                                  
+
 end
 function get_csc_view(csc::SparseMatrixCSC{Tv,Ti},Ix,Jx;inds=collect(1:nnz(csc))) where {Tv,Ti<:Integer}
     cscind = Symmetric(SparseMatrixCSC{Int,Ti}(csc.m,csc.n,csc.colptr,csc.rowval,inds),:L)

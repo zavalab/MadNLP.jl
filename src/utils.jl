@@ -2,8 +2,9 @@
 # Created by Sungho Shin (sungho.shin@wisc.edu)
 
 # Build info
-default_linear_solver() = @isdefined(libhsl) ? Ma57 : @isdefined(libmumps) ? Mumps : Umfpack
-default_dense_solver() = LapackMKL
+default_linear_solver() = MadNLPUmfpack
+default_dense_solver() = MadNLPLapackCPU
+default_iterator() = MadNLPRichardson
 
 # Options
 abstract type AbstractOptions end
@@ -26,7 +27,7 @@ end
 module DummyModule end
 
 # Logger
-@with_kw mutable struct Logger
+@kwdef mutable struct Logger
     print_level::LogLevels = INFO
     file_print_level::LogLevels = INFO
     file::Union{IOStream,Nothing} = nothing
@@ -63,22 +64,10 @@ for (name,level,color) in [(:trace,TRACE,7),(:debug,DEBUG,6),(:info,INFO,256),(:
 end
 
 # BLAS
-const blas_num_threads = Ref{Int}()
+const blas_num_threads = Ref{Int}(1)
 function set_blas_num_threads(n::Integer;permanent::Bool=false)
     permanent && (blas_num_threads[]=n)
-    BLAS.set_num_threads(n) # might be mkl64 or openblas64
-    ccall((:mkl_set_dynamic, libmkl32),
-          Cvoid,
-          (Ptr{Int32},),
-          Ref{Int32}(0))
-    ccall((:mkl_set_num_threads, libmkl32),
-          Cvoid,
-          (Ptr{Int32},),
-          Ref{Int32}(n))
-    ccall((:openblas_set_num_threads, libopenblas32),
-          Cvoid,
-          (Ptr{Int32},),
-          Ref{Int32}(n))
+    BLAS.set_num_threads(n) 
 end
 macro blas_safe_threads(args...)
     code = quote

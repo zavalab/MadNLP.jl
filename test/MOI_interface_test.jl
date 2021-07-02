@@ -30,6 +30,10 @@ const config_no_duals = MOIT.TestConfig(atol=1e-4, rtol=1e-4, duals=false,
         MOI.set(optimizer, MOI.TimeLimitSec(), my_time_limit)
         @test MOI.get(optimizer, MOI.TimeLimitSec()) == my_time_limit
     end
+    @testset "MOI.MaxIter" begin
+        MOI.set(optimizer,MOI.RawParameter("max_iter"),1)
+        @test MOI.get(optimizer,MOI.RawParameter("max_iter")) == 1
+    end
 end
 
 @testset "Testing getters" begin
@@ -68,7 +72,8 @@ end
         "feasibility_sense_with_objective_and_no_hessian", # we need Hessians
         "feasibility_sense_with_no_objective_and_no_hessian", # we need Hessians
         "hs071_no_hessian", # we need Hessians
-    ] 
+        "hs071_hessian_vector_product_test", # Hessian-vector product is needed
+    ]
     MOIT.nlptest(optimizer,config,exclude)
 end
 
@@ -102,6 +107,15 @@ end
                "delete_soc_variables", # VectorOfVar. in SOC not supported
                "solve_result_index", # DualObjectiveValue not supported
                "time_limit_sec", #time limit given as Flaot64?
+               "solve_farkas_interval_lower",
+               "solve_farkas_lessthan",
+               "solve_farkas_interval_upper",
+               "solve_farkas_greaterthan",
+               "solve_farkas_variable_lessthan_max",
+               "solve_farkas_variable_lessthan",
+               "solve_farkas_equalto_lower",
+               "solve_farkas_equalto_upper",
+               "solve_qp_edge_cases"
                ]
     MOIT.unittest(bridged, config, exclude)
 end

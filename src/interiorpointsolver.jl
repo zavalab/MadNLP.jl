@@ -1,7 +1,7 @@
 # MadNLP.jl
 # Created by Sungho Shin (sungho.shin@wisc.edu)
 
-@with_kw mutable struct Counters
+@kwdef mutable struct Counters
     k::Int = 0 # total iteration counter
     l::Int = 0 # backtracking line search counter
     t::Int = 0 # restoration phase counter
@@ -22,14 +22,13 @@
     acceptable_cnt::Int = 0
 end
 
-@with_kw mutable struct Options <: AbstractOptions
+@kwdef mutable struct Options <: AbstractOptions
     # General options
     rethrow_error::Bool = true
     disable_garbage_collector::Bool = false
     blas_num_threads::Int = 1
     linear_solver::Module
-    iterator::Module = Richardson
-    linear_system_scaler::Module = DummyModule
+    iterator::Module = default_iterator()
 
     # Output options
     output_file::String = ""
@@ -236,7 +235,6 @@ mutable struct Solver
 
     linear_solver::AbstractLinearSolver
     iterator::AbstractIterator
-    linear_system_scaler::Union{Nothing,AbstractLinearSystemScaler}
 
     obj_scale::Vector{Float64}
     con_scale::Vector{Float64}
@@ -423,7 +421,7 @@ function Solver(nlp::NonlinearProgram;
     _w3 = Vector{Float64}(undef,aug_vec_length)
     _w3x= view(_w3,1:n)
     _w3l= view(_w3,n+1:n+m)
-    _w4 = zeros(aug_vec_length) # need to initialize to zero due to symv!
+    _w4 = zeros(aug_vec_length) # need to initialize to zero due to mul!
     _w4x= view(_w4,1:n)
     _w4l= view(_w4,n+1:n+m)
 
@@ -497,15 +495,11 @@ function Solver(nlp::NonlinearProgram;
     @trace(logger,"Initializing linear solver.")
     cnt.linear_solver_time =
         @elapsed linear_solver = opt.linear_solver.Solver(aug_com;option_dict=option_dict,logger=logger)
-
+    
     @trace(logger,"Initializing iterative solver.")
     iterator = opt.iterator.Solver(
         Vector{Float64}(undef,m+n),
-        (b,x)->symv!(b,aug_com,x),(x)->solve!(linear_solver,x);option_dict=option_dict)
-
-    @trace(logger,"Initializing linear system scaler.")
-    linear_system_scaler = opt.linear_system_scaler == DummyModule ? nothing :
-        opt.linear_system_scaler.Scaler(aug_com)
+        (b,x)->mul!(b,Symmetric(aug_com,:L),x),(x)->solve!(linear_solver,x);option_dict=option_dict)
 
     @trace(logger,"Initializing fixed variable treatment scheme.")
     fixed_variable_treatment_aug = get_fixed_variable_treatment_aug(aug_com,ind_fixed)
@@ -518,15 +512,12 @@ function Solver(nlp::NonlinearProgram;
         @trace(logger,"Factorization started.")
         aug_compress()
         fixed_variable_treatment_aug()
-        linear_system_scaler == nothing ||
-            (rescale!(linear_system_scaler); scale!(aug_com,linear_system_scaler))
         cnt.linear_solver_time += @elapsed factorize!(linear_solver)
     end
 
     function solve_refine_wrapper!(x,b)
         @trace(logger,"Iterative solution started.")
         fixed_variable_treatment_vec!(b,ind_fixed)
-        linear_system_scaler == nothing || scale!(b,linear_system_scaler)
 
         cnt.linear_solver_time += @elapsed (result = solve_refine!(x,iterator,b))
         if result == :Solved
@@ -541,7 +532,6 @@ function Solver(nlp::NonlinearProgram;
                 solve_status = false
             end
         end
-        linear_system_scaler == nothing || scale!(x,linear_system_scaler)
         fixed_variable_treatment_vec!(x,ind_fixed)
         return solve_status
     end
@@ -602,7 +592,7 @@ function Solver(nlp::NonlinearProgram;
                   x_trial,c_trial,0.,x_slk,c_slk,rhs,ind_fixed,ind_llb,ind_uub,
                   x_lr,x_ur,xl_r,xu_r,zl_r,zu_r,dx_lr,dx_ur,x_trial_lr,x_trial_ur,
                   factorize_wrapper!,solve_refine_wrapper!,
-                  linear_solver,iterator,linear_system_scaler,
+                  linear_solver,iterator,
                   obj_scale,con_scale,con_jac_scale,
                   obj,obj_grad!,con!,con_jac!,lag_hess!,
                   0.,0.,0.,0.,0.,0.,0.,0.,0.," ",0.,0.,0.,
@@ -641,7 +631,7 @@ function initialize!(ips::Solver)
     # Initialize dual variables
     @trace(ips.logger,"Initializing constraint duals.")
     if !ips.opt.dual_initialized
-        if ips.opt.reduced_system 
+        if ips.opt.reduced_system
             set_initial_aug_reduced!(ips.pr_diag,ips.du_diag,ips.hess)
             set_initial_rhs_reduced!(ips.px,ips.pl,ips.f,ips.zl,ips.zu)
         else
@@ -653,7 +643,7 @@ function initialize!(ips::Solver)
         ips.solve_refine!(ips.d,ips.p)
         norm(ips.dl,Inf)>ips.opt.constr_mult_init_max ? (ips.l.= 0.) : (ips.l.= ips.dl)
     end
-    
+
     # Initializing
     ips.obj_val = ips.obj(ips.x)
     ips.con!(ips.c,ips.x)
@@ -669,12 +659,39 @@ function initialize!(ips::Solver)
     return REGULAR
 end
 
+
+function reinitialize!(ips::Solver)
+    ips.obj_val = ips.nlp.obj_val*ips.obj_scale[]
+    view(ips.x,1:ips.nlp.n) .= ips.nlp.x
+    view(ips.zl,1:ips.nlp.n) .= ips.nlp.zl 
+    view(ips.zu,1:ips.nlp.n) .= ips.nlp.zu
+
+    ips.obj_val = ips.obj(ips.x)
+    ips.obj_grad!(ips.f,ips.x)
+    ips.con!(ips.c,ips.x)
+    ips.con_jac!(ips.x)
+    ips.lag_hess!(ips.x,ips.l)
+
+    theta = get_theta(ips.c)
+    ips.theta_max=1e4*max(1,theta)
+    ips.theta_min=1e-4*max(1,theta)
+    ips.mu=ips.opt.mu_init
+    ips.tau=max(ips.opt.tau_min,1-ips.opt.mu_init)
+    ips.filter = [(ips.theta_max,-Inf)]
+
+    return REGULAR
+end
+
 # major loops ---------------------------------------------------------
 function optimize!(ips::Solver)
     try
-        @notice(ips.logger,"This is $(introduce()), running with $(introduce(ips.linear_solver))\n")
-        print_init(ips)
-        ips.status == INITIAL && (ips.status = initialize!(ips))
+        if ips.status == INITIAL
+            @notice(ips.logger,"This is $(introduce()), running with $(introduce(ips.linear_solver))\n")
+            print_init(ips)
+            ips.status = initialize!(ips)
+        else # resolving the problem
+            ips.status = reinitialize!(ips)
+        end
 
         while ips.status >= REGULAR
             ips.status == REGULAR && (ips.status = regular!(ips))
@@ -721,7 +738,7 @@ end
 function regular!(ips::Solver)
     while true
         (ips.cnt.k!=0 && !ips.opt.jacobian_constant) && ips.con_jac!(ips.x)
-        mv!(ips.jacl,ips.jac_com',ips.l)
+        mul!(ips.jacl,ips.jac_com',ips.l)
         fixed_variable_treatment_vec!(ips.jacl,ips.ind_fixed)
         fixed_variable_treatment_z!(ips.zl,ips.zu,ips.f,ips.jacl,ips.ind_fixed)
 
@@ -747,7 +764,7 @@ function regular!(ips::Solver)
 
         # update the barrier parameter
         @trace(ips.logger,"Updating the barrier parameter.")
-        while ips.mu != ips.opt.mu_min &&
+        while ips.mu != max(ips.opt.mu_min,ips.opt.tol/10) &&
             max(ips.inf_pr,ips.inf_du,inf_compl_mu) <= ips.opt.barrier_tol_factor*ips.mu
             mu_new = get_mu(ips.mu,ips.opt.mu_min,
                             ips.opt.mu_linear_decrease_factor,ips.opt.mu_superlinear_decrease_power,ips.opt.tol)
@@ -876,7 +893,7 @@ function robust!(ips::Solver)
     RR = ips.RR
     while true
         !ips.opt.jacobian_constant && ips.con_jac!(ips.x)
-        mv!(ips.jacl,ips.jac_com',ips.l)
+        mul!(ips.jacl,ips.jac_com',ips.l)
         fixed_variable_treatment_vec!(ips.jacl,ips.ind_fixed)
         fixed_variable_treatment_z!(ips.zl,ips.zu,ips.f,ips.jacl,ips.ind_fixed)
         # end
@@ -1133,7 +1150,7 @@ function inertia_free_reg(ips::Solver)
     ips.factorize!()
     solve_status = (ips.solve_refine!(d0,p0) && ips.solve_refine!(ips.d,ips.p))
     t .= ips.dx.-n
-    symv!(ips._w4,ips.aug_com,ips._w3) # prepartation for curv_test
+    mul!(ips._w4,Symmetric(ips.aug_com,:L),ips._w3) # prepartation for curv_test
     n_trial = 0
     ips.del_w = del_w_prev = 0.
 
@@ -1158,7 +1175,7 @@ function inertia_free_reg(ips::Solver)
         ips.factorize!()
         solve_status = (ips.solve_refine!(d0,p0) && ips.solve_refine!(ips.d,ips.p))
         t .= ips.dx.-n
-        symv!(ips._w4,ips.aug_com,ips._w3) # prepartation for curv_test
+        mul!(ips._w4,Symmetric(ips.aug_com,:L),ips._w3) # prepartation for curv_test
         n_trial += 1
     end
 
@@ -1710,7 +1727,7 @@ function print_summary_2(ips::Solver)
     @notice(ips.logger,"Number of objective gradient evaluations             = $(ips.cnt.obj_grad_cnt)")
     @notice(ips.logger,"Number of constraint evaluations                     = $(ips.cnt.con_cnt)")
     @notice(ips.logger,"Number of constraint Jacobian evaluations            = $(ips.cnt.con_jac_cnt)")
-    @notice(ips.logger,"Number of Lagrangian Hessian evaluations          = $(ips.cnt.lag_hess_cnt)")
+    @notice(ips.logger,"Number of Lagrangian Hessian evaluations             = $(ips.cnt.lag_hess_cnt)")
     @notice(ips.logger,@sprintf("Total wall-clock secs in solver (w/o fun. eval./lin. alg.)  = %6.3f",
                                 ips.cnt.solver_time))
     @notice(ips.logger,@sprintf("Total wall-clock secs in linear solver                      = %6.3f",
