@@ -23,10 +23,10 @@ MadNLPGPUCUDAExt = ["CUDA", "CUDSS"]
 
 [compat]
 AMD = "0.5"
-Adapt = "4"
 AMDGPU = "2"
+Adapt = "4"
 CUDA = "5.4.0"
-CUDSS = "0.6.4"
+CUDSS = "0.6.4, 0.7"
 GPUArraysCore = "0.2"
 KernelAbstractions = "0.9"
 MadNLP = "0.9"
